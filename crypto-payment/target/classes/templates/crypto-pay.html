@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Crypto Pay</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+    <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px; }
+        .card { border: 1px solid #e3e3e3; border-radius: 12px; padding: 16px; }
+        .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        .muted { color: #666; }
+        .pill { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; background:#eef; }
+        .btn { padding:8px 12px; border:1px solid #ddd; border-radius:8px; background:#f8f8f8; cursor:pointer; }
+        .btn:active { transform: translateY(1px); }
+        .danger { background:#fee; border-color:#f6c; }
+        .ok { background:#e8ffe8; border-color:#bde5bd; }
+        .qr { width: 180px; height: 180px; background:#fafafa; border:1px dashed #ccc; display:flex; align-items:center; justify-content:center; border-radius:8px; }
+        a { color: #0a58ca; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+
+<h2>Pay with Bitcoin (testnet)</h2>
+
+<div class="card">
+    <p><b>Order:</b> <span th:text="${merchantOrderId}">M-ORDER</span></p>
+
+    <div class="row" style="align-items: flex-start;">
+        <div>
+            <div class="qr" id="qrBox">
+                <!-- (opciono) ovde može i prava QR slika; za POC prikazujemo URI kao link ispod -->
+                QR
+            </div>
+        </div>
+
+        <div style="flex:1 1 320px;">
+            <p><b>Send to address</b><br>
+                <code class="mono" id="btcAddr" th:text="${btcAddress}">tb1...</code>
+                <button class="btn" onclick="copyText('btcAddr')">Copy</button>
+            </p>
+            <p><b>Amount (fiat):</b>
+                <span th:text="${fiatAmount} ?: '-'"></span>
+                <span th:text="${fiatCurrency} ?: '-'"></span>
+            </p>
+
+            <p><b>Amount (BTC):</b>
+                <span th:text="${btcAmount} ?: '(enter amount in wallet)'"></span>
+            </p>
+
+            <p><b>BTC URI</b><br>
+                <a class="mono" th:href="${btcUri}" th:text="${btcUri}">bitcoin:tb1...</a>
+                <button class="btn" onclick="copyUri()">Copy</button>
+            </p>
+
+            <p class="muted">
+                Amount (BTC): <span class="mono" th:text="${btcAmount} ?: '—'">—</span>
+                <br>
+                (If amount is not prefilled in your wallet, send exactly this amount.)
+            </p>
+
+            <p>
+                <span class="pill" id="statusPill">Waiting for payment…</span>
+                <span class="muted"> • Expires in <span id="countdown">—</span></span>
+            </p>
+        </div>
+    </div>
+</div>
+
+<p class="muted" style="margin-top:12px;">
+    After sending, this page will check the blockchain and redirect automatically once confirmed.
+</p>
+
+<!-- Thymeleaf inline JS -->
+<script th:inline="javascript">
+    // server-side variables
+    const paymentId     = /*[[${paymentId}]]*/ '';
+    const merchantOrder = /*[[${merchantOrderId}]]*/ '';
+    const btcAddress    = /*[[${btcAddress}]]*/ '';
+    const btcUri        = /*[[${btcUri}]]*/ '';
+    const successUrl    = /*[[${successUrl}]]*/ '';
+    const failedUrl     = /*[[${failedUrl}]]*/ '';
+    const errorUrl      = /*[[${errorUrl}]]*/ '';
+    const expiresAtIso  = /*[[${expiresAt}]]*/ null; // set in model if available
+
+    // helpers
+    function copyText(elId) {
+      const el = document.getElementById(elId);
+      navigator.clipboard.writeText(el.textContent.trim()).catch(()=>{});
+    }
+    function copyUri() {
+      navigator.clipboard.writeText(btcUri).catch(()=>{});
+    }
+
+    // simple countdown (if expiresAt provided)
+    let expiry = expiresAtIso ? new Date(expiresAtIso).getTime() : null;
+    const countdownEl = document.getElementById('countdown');
+    function tickCountdown() {
+      if (!expiry || !countdownEl) return;
+      const s = Math.max(0, Math.floor((expiry - Date.now())/1000));
+      const mm = String(Math.floor(s/60)).padStart(2,'0');
+      const ss = String(s%60).padStart(2,'0');
+      countdownEl.textContent = `${mm}:${ss}`;
+      if (s === 0) { document.getElementById('statusPill').textContent = 'Expired'; document.getElementById('statusPill').className='pill danger'; }
+    }
+    setInterval(tickCountdown, 1000); tickCountdown();
+
+    // polling
+    const statusPill = document.getElementById('statusPill');
+
+    async function poll() {
+      try {
+        const u = new URL('/api/crypto/status', window.location.origin);
+        u.searchParams.set('paymentId', paymentId);
+        u.searchParams.set('merchantOrderId', merchantOrder);
+        u.searchParams.set('btcAddress', btcAddress);
+
+        const r = await fetch(u.toString(), { credentials: 'same-origin' });
+        if (!r.ok) throw new Error('HTTP '+r.status);
+        const s = await r.json();
+
+        // opcioni: s.confirmations; s.txid; s.status
+        if (s.status === 'CONFIRMED') {
+          statusPill.textContent = 'Confirmed';
+          statusPill.className = 'pill ok';
+          window.location.href = successUrl;
+          return;
+        }
+        if (s.status === 'FAILED') {
+          statusPill.textContent = 'Failed';
+          statusPill.className = 'pill danger';
+          window.location.href = failedUrl;
+          return;
+        }
+        if (s.status === 'EXPIRED') {
+          statusPill.textContent = 'Expired';
+          statusPill.className = 'pill danger';
+          window.location.href = failedUrl; // ili errorUrl, po želji
+          return;
+        }
+
+        // pending — prikaži suptilan progress
+        statusPill.textContent = 'Waiting for payment…';
+
+      } catch (e) {
+        console.error(e);
+        // Nemoj odmah preusmeriti na error; kratko sačekaj pa probaj opet
+      }
+      setTimeout(poll, 4000); // malo smanji učestalost
+    }
+
+    // prikaži BTC URI u “QR” box-u kao fallback (bez biblioteke za QR)
+    (function showFakeQr(){
+      const box = document.getElementById('qrBox');
+      if (box) box.textContent = 'Open wallet with URI below';
+    })();
+
+    poll();
+</script>
+</body>
+</html>
